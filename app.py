@@ -134,7 +134,7 @@ def main():
     - Goal: {goal}
 
     **What to output**
-    1. 🏋️ Workout Plan (weekly structure, warm-up & at-home alternatives)
+    1. 🏋️ Workout Plan (weekly structure, warm-up & at-home alternatives แบบละเอียด เช่น บอกชื่อท่า บอกจำนวนเซท จำนวนครั้ง)
     2. 🍱 Nutrition Guide (TDEE estimate, macros in grams, 
     and examples of how to hit the protein target with food items like chicken, eggs, milk, tofu, whey, etc.)
 

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Chat with CSV Using Agentic AI
 
 This project leverages **Agentic AI**, **Phidata**, **Groq**, and **Streamlit** to enable an interactive, chat-based interface for querying data from a CSV file. Specifically, it uses the IMDB Movie dataset (`IMDB-Movie-Data.csv`) and allows users to ask natural language questions about the dataset. The solution integrates the powerful Groq model to process questions efficiently, making it possible to extract insights from large CSV files with ease.
@@ -79,3 +80,6 @@ This will launch a local development server and you can interact with the app in
 - **Phidata**: Data integration framework.
 - **Streamlit**: For creating the user-friendly web interface.
 - **Agentic AI**: Enabling natural language interactions with the data.
+=======
+# SHEs-Effort
+>>>>>>> 4c1a1a845d3630f13e75c2c77e66c1073cfae807
