@@ -134,9 +134,10 @@ def main():
     - Goal: {goal}
 
     **What to output**
-    1. 🏋️ Workout Plan (weekly structure, warm-up & at-home alternatives แบบละเอียด เช่น บอกชื่อท่า บอกจำนวนเซท จำนวนครั้ง)
-    2. 🍱 Nutrition Guide (TDEE estimate, macros in grams, 
-    and examples of how to hit the protein target with food items like chicken, eggs, milk, tofu, whey, etc.)
+    1. ประเมินความเป็นไปได้จาก User profile ว่าใช้เวลาเท่าไหร่ ถึงจะลด body fat ได้ตาม Target พร้อมคำอธิบาย
+    2. 🏋️ Workout Plan (weekly structure, warm-up & at-home alternatives แบบละเอียด เช่น บอกชื่อท่า บอกจำนวนเซท จำนวนครั้ง)
+    3. 🍱 Nutrition Guide (TDEE estimate, macros in grams, 
+    and examples of how to hit the protein target with food items like chicken, eggs, milk, tofu, whey, etc. บอกตัวอย่างอาหาร เน้นอาหารไทย)
 
     **Important:** 
     - Make it short and easy to read, similar to a fitness infographic.
