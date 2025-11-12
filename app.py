@@ -1,162 +1,167 @@
 import os
+import requests
+import json
 from dotenv import load_dotenv
 from pathlib import Path
-from phi.agent.python import PythonAgent
-from phi.file.local.csv import CsvFile
-from phi.model.groq import Groq
 import streamlit as st
 
-# Load environment variables for API keys and configurations
+# --- Configuration and Setup ---
+
+# Set page configuration for a wider layout and a title
+st.set_page_config(layout="wide", page_title="Fitness Planner")
+
+# Load environment variables from a .env file
 load_dotenv()
+API_KEY = os.getenv("SCGC_API_KEY")
 
-# Set up the base directory for temporary files
-cwd = Path(__file__).parent.resolve()
-tmp = cwd.joinpath("tmp")
-if not tmp.exists():
-    tmp.mkdir(exist_ok=True, parents=True)
+# API Endpoints
+MODELS_URL = "https://scgc-llmproxy.scg.com/models"
+CHAT_URL = "https://scgc-llmproxy.scg.com/v1/chat/completions"
 
-# Path to the local IMDB CSV file
-local_csv_path = "IMDB-Movie-Data.csv"
+# Common headers for API requests
+headers = {
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json"
+}
 
-# Ensure the CSV file exists in the project directory
-if not os.path.exists(local_csv_path):
-    raise FileNotFoundError(f"The file {local_csv_path} does not exist. Please ensure it is placed in the project directory.")
+# --- API Functions ---
 
-# Configure the PythonAgent with Groq's Llama model and the local CSV file
-python_agent = PythonAgent(
-    #model=Groq(id="llama-3.1-70b-versatile"),  # Use Groq's Llama 3.1 70B Versatile model
-    model=Groq(id="meta-llama/llama-4-maverick-17b-128e-instruct"),  # Use Groq's Llama 3.1 70B Versatile model
-    base_dir=tmp,  # Temporary directory for intermediate files
-    files=[
-        CsvFile(
-            path=local_csv_path,  # Integrate the IMDB CSV file
-            description="A dataset containing information about movies, genres, directors, and IMDB ratings.",
-        )
-    ],
-    markdown=True,  # Enable markdown formatting for responses
-    pip_install=True,  # Install required dependencies automatically
-    show_tool_calls=True,  # Display tool calls for better transparency
-)
+@st.cache_data(ttl=3600) # Cache the model list for 1 hour
+def list_models():
+    """Fetches and caches the list of available LLM models from the API."""
+    if not API_KEY:
+        st.error("API_KEY is not configured. Please set SCGC_API_KEY in your .env file.")
+        return []
+    
+    try:
+        response = requests.get(MODELS_URL, headers=headers, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        models = [m["id"] for m in result.get("data", [])]
+        return models
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to connect to the model API: {e}")
+        return []
 
-# Main function for the Streamlit app
+def call_llm(model_name, user_prompt):
+    """Sends a prompt to the specified LLM model and returns the response."""
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.7
+    }
+    
+    try:
+        response = requests.post(CHAT_URL, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to call the LLM API: {e}")
+        return f"An error occurred: {e}"
+
+# --- Streamlit UI ---
+
 def main():
-    st.header("Step 1: Collect Personal Data (for TDEE & Goals)")
+    """Defines the main UI and logic for the Streamlit application."""
+    st.title("✨ Your Personalized Fitness Planner ✨")
+    st.write("Tell us a bit about yourself and your goals, and we'll create a plan just for you!")
 
-    # Gender at the top
-    gender = st.radio(
-        "Gender",
-        ["Male", "Female", "Other / Prefer not to say"],
-        horizontal=True
-    )
+    # Fetch available models and create a dropdown selector
+    models = list_models()
+    if not models:
+        st.warning("Could not load LLM models. The application cannot proceed.")
+        return
 
-    # Personal details: 2-column layout
-    col1, col2 = st.columns(2)
+    # Set the default model to 'GPT-4o' if available, otherwise default to the first model
+    default_model_name = "GPT-4o"
+    default_index = 0
+    if default_model_name in models:
+        default_index = models.index(default_model_name)
+    
+    # --- Input Section ---
+    # Group all inputs inside a main container for a cleaner look
+    with st.container(border=True):
+        selected_model = st.selectbox("Select LLM Model", models, index=default_index)
+        st.divider()
 
-    with col1:
-        age = st.selectbox(
-            "Age",
-            options=list(range(10, 101)),
-            index=20  # default to 30
-        )
-        body_fat = st.selectbox(
-            "Current Body Fat % (optional)",
-            options=[round(x * 0.5, 1) for x in range(0, 201)],
-            index=40  # default 20.0%
-        )
-        target_body_fat = st.selectbox(
-            "Target Body Fat % (optional)",
-            options=[round(x * 0.5, 1) for x in range(0, 201)],
-            index=30  # default 15.0%
-        )
+        # Group personal data inputs
+        st.subheader("Personal Details")
+        gender = st.radio("Gender", ["Male", "Female", "Other / Prefer not to say"], horizontal=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            age = st.selectbox("Age", options=list(range(20, 65)), index=10) # Default age 30
+            
+            # Options for body fat percentage from 5.0% to 40.0%
+            fat_options = [round(x * 0.5, 1) for x in range(10, 81)]
+            body_fat = st.selectbox("Current Body Fat %", options=fat_options, index=30) # Default 20%
+            target_body_fat = st.selectbox("Target Body Fat %", options=fat_options, index=20) # Default 15%
+        
+        with col2:
+            # Create weight options with 0.5 increments by doubling the range and dividing by 2
+            weight_options = [w * 0.5 for w in range(80, 301)] # This creates values from 40.0, 40.5, ..., 150.0
+            weight_kg = st.selectbox("Weight (kg)", options=weight_options, index=40) # Default 60kg
 
-    with col2:
-        weight_kg = st.selectbox(
-            "Weight (kg)",
-            options=[round(w, 1) for w in range(30, 151)],
-            index=30  # default 60.0
-        )
-        height_cm = st.selectbox(
-            "Height (cm)",
-            options=list(range(120, 221)),
-            index=45  # default 165
-        )
+            height_cm = st.selectbox("Height (cm)", options=list(range(140, 201)), index=25) # Default 165cm
 
-    # Activity and Goal in next row
-    col3, col4 = st.columns(2)
+        st.divider()
 
-    with col3:
-        activity = st.selectbox("Activity Level (daily life, not workouts)", [
-            "Sedentary (desk job, little movement)",
-            "Light (walks sometimes)",
-            "Moderate (on feet often)",
-            "Active (physical job or lots of movement)"
-        ])
+        # Group goal-related inputs
+        st.subheader("Activity & Goals")
+        col3, col4 = st.columns(2)
+        with col3:
+            activity = st.selectbox("Activity Level (daily life, not workouts)", ["Sedentary (desk job, little movement)", "Light (walks sometimes)", "Moderate (on feet often)", "Active (physical job or lots of movement)"])
+        with col4:
+            goal = st.selectbox("Goal", ["Feel better / Healthier", "Gentle fat loss", "Gentle muscle tone", "Reduce stress & move more"])
 
-    with col4:
-        goal = st.selectbox("Goal", [
-            "Feel better / Healthier",
-            "Gentle fat loss",
-            "Gentle muscle tone",
-            "Reduce stress & move more"
-        ])
+    # Create space before the button
+    st.write("") 
 
-    # Spacer
-    st.markdown("---")
+    if st.button("✨ Generate My Plan!", use_container_width=True):
+        # Create a unique key for session state based on all user inputs
+        input_key = f"{gender}-{age}-{weight_kg}-{height_cm}-{body_fat}-{target_body_fat}-{activity}-{goal}-{selected_model}"
 
-    # Action button
-    # Unique key for the current user input combination
-    input_key = f"{gender}-{age}-{weight_kg}-{height_cm}-{body_fat}-{target_body_fat}-{activity}-{goal}"
+        # Check for cached results to avoid redundant API calls
+        if "last_inputs" in st.session_state and st.session_state.last_inputs == input_key:
+            st.markdown("Loaded from previous session")
+            st.markdown(st.session_state.last_result)
+        else:
+            with st.spinner("Processing your personalized plan..."):
+                prompt = f"""
+You are a fitness and nutrition coach. Use the information below to create a clear final result only. Do NOT show python code or calculation steps. Return the result as a structured text, ready to display.
 
-    # Check for cached result
-    if "last_inputs" in st.session_state and st.session_state.last_inputs == input_key:
-        st.markdown("✅ Loaded from previous session")
+**User profile**
+- Gender: {gender}
+- Age: {age}
+- Weight: {weight_kg} kg
+- Height: {height_cm} cm
+- Current Body Fat: {body_fat}%
+- Target Body Fat: {target_body_fat}%
+- Activity Level: {activity}
+- Goal: {goal}
+
+**What to output**
+1. An estimation of the time required to reach the target body fat percentage, with an explanation.
+2. A weekly Workout Plan (structure, warm-up, detailed at-home alternatives with exercise names, sets, and reps).
+3. A Nutrition Guide (TDEE estimate, macros in grams, and examples of Thai food to meet protein targets).
+
+**Important:** 
+- Make it easy to read, similar to an infographic.
+- Use bullet points.
+- The response must be in Thai only. (ตอบเป็นภาษาไทยเท่านั้น)
+"""
+                result = call_llm(selected_model, prompt)
+                st.session_state.last_inputs = input_key
+                st.session_state.last_result = result
+                st.markdown(result)
+    
+    # Display result if it exists in session state (for reruns after the button is pressed)
+    elif "last_inputs" in st.session_state:
         st.markdown(st.session_state.last_result)
-    else:
-        if st.button("Calculate and Run"):
-            try:
-                with st.spinner("Processing your personalized plan..."):
-
-                    # Prompt
-                    prompt = f"""
-    You are a fitness and nutrition coach. 
-    Use the information below to create a **clear final result** only. 
-    Do NOT show python code or calculation steps. 
-    Return the result as a structured text with emojis, ready to display.
-
-    **User profile**
-    - Gender: {gender}
-    - Age: {age}
-    - Weight: {weight_kg} kg
-    - Height: {height_cm} cm
-    - Current Body Fat: {body_fat}%
-    - Target Body Fat: {target_body_fat}%
-    - Activity Level: {activity}
-    - Goal: {goal}
-
-    **What to output**
-    1. ประเมินความเป็นไปได้จาก User profile ว่าใช้เวลาเท่าไหร่ ถึงจะลด body fat ได้ตาม Target พร้อมคำอธิบาย
-    2. 🏋️ Workout Plan (weekly structure, warm-up & at-home alternatives แบบละเอียด เช่น บอกชื่อท่า บอกจำนวนเซท จำนวนครั้ง)
-    3. 🍱 Nutrition Guide (TDEE estimate, macros in grams, 
-    and examples of how to hit the protein target with food items like chicken, eggs, milk, tofu, whey, etc. บอกตัวอย่างอาหาร เน้นอาหารไทย)
-
-    **Important:** 
-    - Make it short and easy to read, similar to a fitness infographic.
-    - Use emojis and bullet points.
-    - Do not output python code or calculation steps, only the final readable guide.
-    ตอบเป็นภาษาไทยเท่านั้น
-    """
-
-                    # Run agent
-                    response = python_agent.run(prompt)
-                    st.markdown(response.content)
-
-                    # Save in session state
-                    st.session_state.last_inputs = input_key
-                    st.session_state.last_result = response.content
-
-            except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
-
 
 if __name__ == "__main__":
     main()
