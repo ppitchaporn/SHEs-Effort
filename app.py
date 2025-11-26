@@ -31,11 +31,11 @@ DEFAULTS = {
     "age": 30,
     "body_fat": 34.0,
     "muscle_mass": 23.0,
-    "target_body_fat": 25.0,
+    "target_body_fat": 30.0,
     "weight_kg": 59.0,
     "height_cm": 158,
-    "activity": "Sedentary (desk job, little movement)",
-    "goal": "Feel better / Healthier",
+    "activity": "Active (physical job or lots of movement)",
+    "goal": "Gentle muscle tone",
     "frequency": "3-4 times a week",
 }
 
@@ -256,7 +256,7 @@ def main():
 
         with col2:
             # Weight
-            weight_options = [w * 0.5 for w in range(30, 301)]  # Expanded range
+            weight_options = [w * 0.5 for w in range(30, 301)]
             weight_default = get_default("weight_kg", DEFAULTS["weight_kg"])
             if weight_default not in weight_options:
                 weight_default = DEFAULTS["weight_kg"]
@@ -374,14 +374,18 @@ def main():
 
         tdee = bmr * activity_factor
 
-        # --- [FIX 1] Improved Calorie Factor Logic ---
+        # --- [FIXED] Smart Goal Logic ---
+        # Adjust calorie factor based on whether user needs to lose fat or not
         if goal == "Gentle fat loss":
             calorie_factor = 0.8
         elif goal == "Gentle muscle tone":
-            calorie_factor = 1.05
+            # If current fat > target, prioritize Recomposition (Mild Deficit) instead of Surplus
+            if start_body_fat > target_body_fat_val:
+                calorie_factor = 0.95 
+            else:
+                calorie_factor = 1.05 # Surplus for building if lean
         else:
-            # For "Feel better" or others:
-            # If current fat > target fat, allow a small deficit (5%) to make progress visible.
+            # For "Feel better" or others
             if start_body_fat > target_body_fat_val:
                 calorie_factor = 0.95
             else:
@@ -389,10 +393,10 @@ def main():
 
         target_calories = tdee * calorie_factor
 
-        # Weekly "Energy Balance" (not just deficit)
+        # Weekly "Energy Balance"
         weekly_energy_balance = (target_calories - tdee) * 7
         
-        # --- [FIX 2] Sign Correction ---
+        # --- [FIXED] Sign Logic ---
         # If target < tdee (Deficit), balance is Negative.
         # Fat change should also be Negative (Weight Loss).
         weekly_fat_change_kg = weekly_energy_balance / 7700.0 
@@ -400,12 +404,10 @@ def main():
         # Calculate Mass
         start_fat_mass = start_weight * (start_body_fat / 100.0)
         target_fat_mass = start_weight * (target_body_fat_val / 100.0)
-        
-        # How much fat to lose (absolute value)
         fat_to_lose_kg = max(0.0, start_fat_mass - target_fat_mass)
 
         # Estimate Weeks
-        # If we need to lose fat (fat_to_lose > 0) AND we are losing weight (weekly_fat_change_kg < 0)
+        # Valid if: We are losing fat (change < 0) AND we have fat to lose
         if weekly_fat_change_kg < 0 and fat_to_lose_kg > 0:
             weeks_to_target = fat_to_lose_kg / abs(weekly_fat_change_kg)
         else:
@@ -503,7 +505,6 @@ def main():
 
             for _ in weeks:
                 # Update absolute values
-                # If weekly_fat_change_kg is negative, weight decreases
                 current_weight += weekly_fat_change_kg
                 current_fat_mass += weekly_fat_change_kg 
                 
@@ -523,8 +524,8 @@ def main():
                 current_fat_pct = max(0.0, min(100.0, current_fat_pct))
                 est_muscle_pct = max(0.0, min(100.0, est_muscle_pct))
 
-                if goal == "Gentle fat loss" or (start_body_fat > target_body_fat_val):
-                     # Visual smoother: don't let it dip below target too aggressively in chart
+                # Visual smoother
+                if start_body_fat > target_body_fat_val:
                     current_fat_pct = max(target_body_fat_val - 2.0, current_fat_pct)
 
                 weights.append(current_weight)
@@ -614,9 +615,13 @@ def main():
 
             bmi_str = f"{bmi:.1f}" if bmi is not None else "N/A"
             
-            # Display Deficit as a positive number for readability ("Deficit of 500")
-            display_deficit = abs(weekly_energy_balance)
-            display_fat_change = abs(weekly_fat_change_kg)
+            # Format display strings for balance and change
+            if weekly_energy_balance < 0:
+                balance_str = f"Deficit of {abs(weekly_energy_balance):.0f} kcal/week"
+                change_str = f"Fat LOSS of {abs(weekly_fat_change_kg):.3f} kg/week"
+            else:
+                balance_str = f"Surplus of {weekly_energy_balance:.0f} kcal/week"
+                change_str = f"Gain of {weekly_fat_change_kg:.3f} kg/week"
 
             st.markdown(
                 f"""
@@ -641,9 +646,9 @@ def main():
 **2. Calories, fat change, and time to target**
 
 - **Target calories for your goal:** ~**{target_calories:.0f} kcal/day**  
-- **Estimated Energy Balance:** ~**{weekly_energy_balance:.0f} kcal/week** (Negative = Deficit)
-- Using ~**7,700 kcal ≈ 1 kg of body fat**, this gives an estimated fat change of  
-**{weekly_fat_change_kg:.3f} kg per week** (Negative = Fat Loss).
+- **Estimated Energy Balance:** {balance_str}
+- Using ~**7,700 kcal ≈ 1 kg of body fat**, this corresponds to:  
+**{change_str}**
 
 From your starting and target body fat we estimate you need to change fat mass by about
 **{fat_to_lose_kg:.2f} kg**, which corresponds to **≈ {weeks_to_target:.1f} weeks**.
@@ -679,7 +684,6 @@ For the chart, we use **{estimated_weeks} weeks** (capped if very long) to show 
   - Adjust calories, training, and recovery as needed.
 """
             )
-
 
     elif st.session_state.get("cached_results"):
         pass
