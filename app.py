@@ -130,7 +130,18 @@ def generate_plan_html(model, user_data, metrics):
     1. **Workout Plan:** Analyze the profile. Decide if they need Cardio-focus, Hypertrophy, or Hybrid. 
        - Create a bulleted list for {user_data['frequency']} schedule.
        - Focus on compound movements.
-    2. **Nutrition:** Suggest 3 Thai meals (Menu Name + Rough Ingredients) that fit the macro definition.
+       - **Format Requirements:**
+         - **Emoji:** Start each day with a relevant Workout Emoji (e.g., 🏋️‍♂️ Leg Day, 🏃‍♀️ Cardio).
+         - **Calories:** Estimate calories burned for that session in brackets (e.g., **~350 kcal**).
+         - **Details:** List exercises with specific **Sets x Reps** (e.g., Squats: 4 sets x 10 reps).
+    2. **Nutrition (Thai Style):** 
+    - Divide into 3 Meals: **Breakfast, Lunch, Dinner**.
+    - For **EACH meal**, provide **3 distinct Thai food options** (Combos allowed).
+    - **Format Requirements:** 
+        - Must include an **Emoji** representing the food.
+        - Must specify **Clear Units** (e.g., 1 ladle, 100g, 1 piece, 1 cup).
+        - Must show Macros in brackets: **(Cal: ..., P: ...g, C: ...g, F: ...g)**.
+    - **Example:** "🥣 Joke Moo (Congee) with 1 soft boiled egg (250g) (350 kcal, P:20g, C:40g, F:10g)" or "🐟 1 Fried Mackerel + Shrimp Paste + 1 cup Rice + Fresh Veggies (400 kcal, P:25g, C:50g, F:8g)"
     3. **Design:** Modern CSS, Soft shadows, Rounded corners, Mobile-friendly. Use a clean color palette (Teal/White/Grey).
     
     **Output:**
