@@ -1,692 +1,298 @@
 import os
 import requests
-import json
 from dotenv import load_dotenv
-from pathlib import Path
 import math
 import streamlit as st
 import streamlit.components.v1 as components
-import pandas as pd
 import plotly.graph_objects as go
 import numpy as np
 
-# --- Configuration and Setup ---
-
-st.set_page_config(layout="wide", page_title="Fitness Planner")
-
+# --- Configuration ---
+st.set_page_config(layout="wide", page_title="Fitness Planner AI")
 load_dotenv()
+
+# Constants
 API_KEY = os.getenv("SCGC_API_KEY")
-
-MODELS_URL = "https://scgc-llmproxy.scg.com/models"
 CHAT_URL = "https://scgc-llmproxy.scg.com/v1/chat/completions"
+MODELS_URL = "https://scgc-llmproxy.scg.com/models"
 
-headers = {
+HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Content-Type": "application/json"
 }
 
-# --- Default values for first-time use ---
 DEFAULTS = {
-    "gender": "Female",
-    "age": 30,
-    "body_fat": 34.0,
-    "muscle_mass": 23.0,
-    "target_body_fat": 30.0,
-    "weight_kg": 59.0,
-    "height_cm": 158,
+    "gender": "Female", "age": 30, "height_cm": 158, "weight_kg": 59.0,
+    "body_fat": 34.0, "muscle_mass": 23.0, "target_body_fat": 30.0,
     "activity": "Active (physical job or lots of movement)",
-    "goal": "Gentle muscle tone",
-    "frequency": "3-4 times a week",
+    "goal": "Gentle muscle tone", "frequency": "3-4 times a week",
 }
 
-def get_default(name, fallback):
-    """Return value from session_state if exists, else fallback."""
-    return st.session_state.get(name, fallback)
+# --- Logic Layer (Python does the Math - Reliability) ---
+# Improvement based on AgentBench [7]: Don't let LLM do math.
 
-# --- API Functions ---
+def calculate_metrics(gender, age, weight, height, activity_str, goal_str, body_fat, target_fat):
+    """Calculates BMR, TDEE, BMI, and Time estimations deterministically."""
+    
+    # 1. BMR (Mifflin-St Jeor)
+    if gender == "Male":
+        bmr = (10 * weight) + (6.25 * height) - (5 * age) + 5
+    else:
+        bmr = (10 * weight) + (6.25 * height) - (5 * age) - 161
 
-@st.cache_data(ttl=3600)
-def list_models():
-    """Fetches and caches the list of available LLM models from the API."""
-    if not API_KEY:
-        st.error("API_KEY is not configured. Please set SCGC_API_KEY in your .env file.")
-        return []
-    try:
-        response = requests.get(MODELS_URL, headers=headers, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        models = [m["id"] for m in result.get("data", [])]
-        return models
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to connect to the model API: {e}")
-        return []
+    # 2. Activity Multiplier
+    if "Sedentary" in activity_str: factor = 1.2
+    elif "Light" in activity_str: factor = 1.375
+    elif "Moderate" in activity_str: factor = 1.55
+    else: factor = 1.725
+    tdee = bmr * factor
 
-def call_llm(model_name, user_prompt):
-    """Call LLM and return the assistant content."""
-    payload = {
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.7,
+    # 3. Goal Adjustment & Macros
+    if "fat loss" in goal_str.lower():
+        cal_factor = 0.85
+        protein_ratio = 0.4
+    elif "muscle" in goal_str.lower():
+        cal_factor = 1.05 if body_fat < target_fat else 0.95 # Recomp
+        protein_ratio = 0.35
+    else:
+        cal_factor = 1.0
+        protein_ratio = 0.3
+
+    target_calories = tdee * cal_factor
+    
+    # Macro Calculation (Gram estimation)
+    protein_g = (target_calories * protein_ratio) / 4
+    fat_g = (target_calories * 0.3) / 9
+    carb_g = (target_calories * (1 - protein_ratio - 0.3)) / 4
+
+    # 4. Timeline Estimation
+    weekly_deficit = (tdee - target_calories) * 7
+    # Note: 7700 kcal approx 1kg fat
+    weekly_fat_change = weekly_deficit / 7700.0 if weekly_deficit > 0 else 0
+    
+    fat_mass_diff = (weight * (body_fat/100)) - (weight * (target_fat/100))
+    weeks_to_target = 0
+    if fat_mass_diff > 0 and weekly_fat_change > 0:
+        weeks_to_target = math.ceil(fat_mass_diff / weekly_fat_change)
+    
+    # Cap weeks for realism
+    weeks_to_target = max(1, min(weeks_to_target, 52))
+
+    # BMI
+    height_m = height / 100
+    bmi = weight / (height_m ** 2)
+
+    return {
+        "bmr": int(bmr),
+        "tdee": int(tdee),
+        "target_calories": int(target_calories),
+        "macros": {"p": int(protein_g), "f": int(fat_g), "c": int(carb_g)},
+        "weeks": weeks_to_target,
+        "bmi": round(bmi, 1),
+        "bmi_cat": "Normal" if 18.5 <= bmi < 25 else "Over/Under weight" # Simplified
     }
+
+# --- Interface Layer (LLM Interaction - ACI) ---
+# Improvement based on SWE-agent [3]: Clear instructions, structured output.
+
+def list_models():
+    if not API_KEY: return []
     try:
-        response = requests.post(CHAT_URL, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to call the LLM API: {e}")
-        return f"An error occurred: {e}"
+        resp = requests.get(MODELS_URL, headers=HEADERS, timeout=10)
+        return [m["id"] for m in resp.json().get("data", [])]
+    except Exception as e:
+        st.error(f"Model API Error: {e}")
+        return []
 
-# --- Prompt Template ---
+def generate_plan_html(model, user_data, metrics):
+    """Generates the HTML/CSS using LLM with pre-calculated metrics."""
+    
+    # Tree of Thoughts [5]: Ask LLM to reason about the 'Split' before writing code
+    prompt = f"""
+    You are a professional fitness coach and frontend developer.
+    
+    **Task:** Create a responsive, beautiful HTML infographic for a fitness plan.
+    **Constraint:** Return ONLY the raw HTML code. No markdown fences (```), no conversational text.
+    
+    **User Profile:**
+    - Gender: {user_data['gender']}, Age: {user_data['age']}
+    - Goal: {user_data['goal']} ({user_data['frequency']})
+    - Body Stats: {user_data['weight_kg']}kg, {user_data['height_cm']}cm, BF {user_data['body_fat']}%
+    
+    **Pre-calculated Science (USE THESE EXACT VALUES):**
+    - BMI: {metrics['bmi']} ({metrics['bmi_cat']})
+    - TDEE: {metrics['tdee']} kcal (Maintenance)
+    - Target Calories: {metrics['target_calories']} kcal
+    - Macros: Protein {metrics['macros']['p']}g, Carbs {metrics['macros']['c']}g, Fat {metrics['macros']['f']}g
+    - Estimated Time to Goal: {metrics['weeks']} weeks
+    
+    **Content Requirements:**
+    1. **Workout Plan:** Analyze the profile. Decide if they need Cardio-focus, Hypertrophy, or Hybrid. 
+       - Create a bulleted list for {user_data['frequency']} schedule.
+       - Focus on compound movements.
+    2. **Nutrition:** Suggest 3 Thai meals (Menu Name + Rough Ingredients) that fit the macro definition.
+    3. **Design:** Modern CSS, Soft shadows, Rounded corners, Mobile-friendly. Use a clean color palette (Teal/White/Grey).
+    
+    **Output:**
+    <!DOCTYPE html>
+    <html>
+    <head><style>...css...</style></head>
+    <body>...content...</body>
+    </html>
+    """
 
-def get_html_generation_prompt(
-    gender,
-    age,
-    weight_kg,
-    height_cm,
-    body_fat,
-    muscle_mass,
-    target_body_fat,
-    activity,
-    goal,
-    frequency,
-    estimated_weeks,
-):
-    """Prompt for HTML infographic generation."""
-    return f"""
-You are an expert front-end developer and fitness coach who writes clean, modern, self-contained HTML and CSS, precisely replicating a given design style. Your task is to generate a complete, data-driven health infographic as a single HTML file based on the user data and the detailed design specification below.
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.5 # Lower temp for more deterministic code structure
+    }
+    
+    try:
+        resp = requests.post(CHAT_URL, headers=HEADERS, json=payload, timeout=60)
+        content = resp.json()["choices"][0]["message"]["content"]
+        
+        # Reflexion [8] Guardrail: Self-correction of formatting
+        if "```" in content:
+            content = content.replace("```html", "").replace("```", "")
+        return content.strip()
+        
+    except Exception as e:
+        return f"<h3>Error generating plan: {e}</h3>"
 
-You must perform the necessary calculations (BMI, TDEE, etc.) based on the user data to fill in the metric values.
-
----
-### **Part 1: Content to Include**
-
-**User Profile:**
-- **Age:** {age}
-- **Gender:** {gender}
-- **Height:** {height_cm} cm
-- **Weight:** {weight_kg} kg
-- **Current Body Fat:** {body_fat}%
-- **Current Muscle Mass:** {muscle_mass}%
-- **Target Body Fat:** {target_body_fat}%
-- **Activity Level:** {activity}
-- **Primary Goal:** {goal}
-
-**Key Health Metrics (Calculated):**
-- **BMI:** [Calculate Value] and provide its category (e.g., Normal, Overweight).
-- **Estimated Daily Calories:** [Calculate TDEE Value] for the user's goal.
-    - **Macro Breakdown:** Provide approximate grams per day for Protein, Carbs, and Fats.
-        - **Always Example food of each Macro:** [Provide brief daily gram values for Protein, Carbs, Fats.]
-        - **Example Calculation:** [Provide brief explanation of how TDEE and macros were calculated.]
-        - **Estimated Body Fat Change:** [Calculate Value] per week based on calorie deficit/surplus.
-    - **Body Fat to Lose/Gain:** Calculate the amount of fat to lose/gain to reach the target body fat percentage.
-
-**Weekly Exercise Plan Overview:**
-- **Initial Analysis and Phasing:**
-    - First, analyze the user's complete profile (age, goal, body fat, muscle mass, activity level).
-    - Based on this analysis, determine if they should start with a focus on cardio, weight training, or a hybrid approach. **You must state your reasoning clearly.**
-    - Structure the plan into two phases: a **Short-term Plan (First 4 Weeks)** and a **Long-term Plan (Moving Forward)**.
-
-- **Detailed Workout Plan (for the Short-term Plan):**
-    - **You MUST present the workout plan as a simple, nested bulleted list (`<ul>` and `<li>` tags).** Do not use tables or complex column layouts.
-    - Create a main bullet point for each workout day based on the user's frequency ('{frequency}'). Each bullet should state the day and muscle group.
-    - Under each main day, create a nested bulleted list of the gym-based exercises with sets and reps.
-    - After the list, add a concluding sentence about rest days.
-
-**Nutrition Highlights:**
-- **Daily Calorie Target:** State the calculated value.
-- **Macro Focus:** Describe a focus on high protein, moderate carbs, and healthy fats.
-    - **Sample Meals:** Provide 1–2 brief examples of meals/snacks that fit each macro focus.
-    - **Guidelines:** Provide 5 simple meals in Thai style (เมนูอาหารไทย).
-
-**Goal Tracking:**
-- **Short-term Goals (4 weeks):** List 2–3 specific goals.
-- **Medium-term Goals (3 months):** List 2–3 broader outcome goals.
-- **Estimated time to reach target body fat:** {estimated_weeks} weeks based on current rate of change.
-
-**Footer:**
-- Brief explanation of what TDEE and Macros are.
-- A friendly motivational message.
-
----
-### **Part 2: Design & Style Specification**
-
-[Keep the detailed style system, layout, responsive rules, colors, components, and text styles exactly as specified in the original prompt.]
-
----
-### **Part 3: Technical & Code Requirements**
-
-- All CSS in a `<style>` tag and all JS in a `<script>` tag (no external files).
-- No external libraries.
-- Use an initialization guard (`if (!window.infographicInitialized)`) and a debounced resize handler for any chart inside the HTML.
-
----
-### **Final Output Format**
-
-Generate the complete HTML code as a single block. Do not add any conversational text, explanations, or markdown fences. The output must be ready to be saved directly as a `.html` file.
-"""
-
-# --- Streamlit UI ---
-
+# --- Presentation Layer (Streamlit UI) ---
 def main():
-    st.title("✨ Your Personalized Fitness Planner ✨")
-    st.write("Tell us a bit about yourself and your goals, and we'll create a plan just for you!")
-
+    st.title("🏋️‍♀️ AI Fitness Planner (Optimized)")
+    
+    # 1. Setup & Config
     models = list_models()
     if not models:
-        st.warning("Could not load LLM models. The application cannot proceed.")
+        st.warning("API Key missing or Service down.")
         return
 
-    default_model_name = "GPT-4o"
-    default_index = models.index(default_model_name) if default_model_name in models else 0
-
-    # ---------------- Input Section ----------------
-    with st.container(border=True):
-        selected_model = st.selectbox("Select LLM Model", models, index=default_index, key="selected_model")
-        st.divider()
-
-        st.subheader("Personal Details")
-
-        # Gender
-        gender_default = get_default("gender", DEFAULTS["gender"])
-        gender_options = ["Male", "Female", "Other / Prefer not to say"]
-        if gender_default not in gender_options:
-            gender_default = DEFAULTS["gender"]
-        gender = st.radio(
-            "Gender",
-            gender_options,
-            horizontal=True,
-            index=gender_options.index(gender_default),
-            key="gender",
-        )
-
-        col1, col2 = st.columns(2)
-        with col1:
-            # Age
-            age_options = list(range(20, 65))
-            age_default = get_default("age", DEFAULTS["age"])
-            if age_default not in age_options:
-                age_default = DEFAULTS["age"]
-            age = st.selectbox(
-                "Age",
-                options=age_options,
-                index=age_options.index(age_default),
-                key="age",
-            )
-
-            # Body fat
-            fat_options = [round(x * 0.5, 1) for x in range(5, 81)]
-            body_fat_default = get_default("body_fat", DEFAULTS["body_fat"])
-            if body_fat_default not in fat_options:
-                body_fat_default = DEFAULTS["body_fat"]
-            
-            # --- Muscle Mass Input ---
-            muscle_options = [round(x * 0.5, 1) for x in range(10, 101)]
-            muscle_mass_default = get_default("muscle_mass", DEFAULTS["muscle_mass"])
-            if muscle_mass_default not in muscle_options:
-                muscle_mass_default = DEFAULTS["muscle_mass"]
-                
-            body_fat = st.selectbox(
-                "Current Body Fat %",
-                options=fat_options,
-                index=fat_options.index(body_fat_default),
-                key="body_fat",
-            )
-
-            muscle_mass = st.selectbox(
-                "Current Muscle Mass %",
-                options=muscle_options,
-                index=muscle_options.index(muscle_mass_default),
-                key="muscle_mass",
-            )
-
-            target_body_fat_default = get_default("target_body_fat", DEFAULTS["target_body_fat"])
-            if target_body_fat_default not in fat_options:
-                target_body_fat_default = DEFAULTS["target_body_fat"]
-            
-            target_body_fat = st.selectbox(
-                "Target Body Fat %",
-                options=fat_options,
-                index=fat_options.index(target_body_fat_default),
-                key="target_body_fat",
-            )
-
-        with col2:
-            # Weight
-            weight_options = [w * 0.5 for w in range(30, 301)]
-            weight_default = get_default("weight_kg", DEFAULTS["weight_kg"])
-            if weight_default not in weight_options:
-                weight_default = DEFAULTS["weight_kg"]
-            weight_kg = st.selectbox(
-                "Weight (kg)",
-                options=weight_options,
-                index=weight_options.index(weight_default),
-                key="weight_kg",
-            )
-
-            # Height
-            height_options = list(range(140, 201))
-            height_default = get_default("height_cm", DEFAULTS["height_cm"])
-            if height_default not in height_options:
-                height_default = DEFAULTS["height_cm"]
-            height_cm = st.selectbox(
-                "Height (cm)",
-                options=height_options,
-                index=height_options.index(height_default),
-                key="height_cm",
-            )
-
-        st.divider()
-        st.subheader("Activity & Goals")
-        col3, col4, col5 = st.columns(3)
-
-        with col3:
-            activity_options = [
-                "Sedentary (desk job, little movement)",
-                "Light (walks sometimes)",
-                "Moderate (on feet often)",
-                "Active (physical job or lots of movement)",
-            ]
-            activity_default = get_default("activity", DEFAULTS["activity"])
-            if activity_default not in activity_options:
-                activity_default = DEFAULTS["activity"]
-            activity = st.selectbox(
-                "Activity Level (daily life, not workouts)",
-                activity_options,
-                index=activity_options.index(activity_default),
-                key="activity",
-            )
-
-        with col4:
-            goal_options = [
-                "Feel better / Healthier",
-                "Gentle fat loss",
-                "Gentle muscle tone",
-                "Reduce stress & move more",
-            ]
-            goal_default = get_default("goal", DEFAULTS["goal"])
-            if goal_default not in goal_options:
-                goal_default = DEFAULTS["goal"]
-            goal = st.selectbox(
-                "Goal",
-                goal_options,
-                index=goal_options.index(goal_default),
-                key="goal",
-            )
-
-        with col5:
-            frequency_options = [
-                "1-2 times a week",
-                "3-4 times a week",
-                "5+ times a week",
-            ]
-            frequency_default = get_default("frequency", DEFAULTS["frequency"])
-            if frequency_default not in frequency_options:
-                frequency_default = DEFAULTS["frequency"]
-            frequency = st.selectbox(
-                "Preferred Workout Frequency",
-                frequency_options,
-                index=frequency_options.index(frequency_default),
-                key="frequency",
-            )
-
-        generate_btn = st.button("Generate My Plan", type="primary")
-
-    # ---------------- Calculation & Logic ----------------
-
-    # Ensure defaults are used if needed
-    start_weight = float(weight_kg)
-    start_body_fat = float(body_fat)
-    start_muscle_mass = float(muscle_mass)
-    target_body_fat_val = float(target_body_fat)
-    height_m = float(height_cm) / 100.0
-
-    # Include muscle_mass in the cache key
-    input_key = f"{selected_model}-{gender}-{age}-{start_weight}-{height_cm}-{start_body_fat}-{start_muscle_mass}-{target_body_fat_val}-{activity}-{goal}-{frequency}"
-
-    if "cached_results" not in st.session_state:
-        st.session_state["cached_results"] = {}
-    cached = st.session_state["cached_results"]
-
-    html_content_to_display = None
-    
-    # Run only if button clicked or if we already have a cached result for this exact input
-    if generate_btn or (input_key in cached):
+    # 2. Sidebar / Input Section (Cleaned & Organized)
+    with st.sidebar:
+        st.header("Profile Settings")
+        selected_model = st.selectbox("Model", models, index=0)
         
-        # --- Basic Math ---
-        # Mifflin-St Jeor
-        if gender == "Male":
-            bmr = (10 * start_weight) + (6.25 * height_cm) - (5 * age) + 5
-        else:
-            bmr = (10 * start_weight) + (6.25 * height_cm) - (5 * age) - 161
-
-        if "Sedentary" in activity:
-            activity_factor = 1.2
-        elif "Light" in activity:
-            activity_factor = 1.375
-        elif "Moderate" in activity:
-            activity_factor = 1.55
-        else:
-            activity_factor = 1.725
-
-        tdee = bmr * activity_factor
-
-        # --- [FIXED] Smart Goal Logic ---
-        # Adjust calorie factor based on whether user needs to lose fat or not
-        if goal == "Gentle fat loss":
-            calorie_factor = 0.8
-        elif goal == "Gentle muscle tone":
-            # If current fat > target, prioritize Recomposition (Mild Deficit) instead of Surplus
-            if start_body_fat > target_body_fat_val:
-                calorie_factor = 0.95 
-            else:
-                calorie_factor = 1.05 # Surplus for building if lean
-        else:
-            # For "Feel better" or others
-            if start_body_fat > target_body_fat_val:
-                calorie_factor = 0.95
-            else:
-                calorie_factor = 1.0
-
-        target_calories = tdee * calorie_factor
-
-        # Weekly "Energy Balance"
-        weekly_energy_balance = (target_calories - tdee) * 7
+        gender = st.radio("Gender", ["Male", "Female"], horizontal=True)
+        age = st.slider("Age", 18, 70, DEFAULTS["age"])
+        height = st.number_input("Height (cm)", 140, 220, DEFAULTS["height_cm"])
+        weight = st.number_input("Weight (kg)", 40.0, 150.0, DEFAULTS["weight_kg"])
         
-        # --- [FIXED] Sign Logic ---
-        # If target < tdee (Deficit), balance is Negative.
-        # Fat change should also be Negative (Weight Loss).
-        weekly_fat_change_kg = weekly_energy_balance / 7700.0 
+        col_a, col_b = st.columns(2)
+        with col_a: body_fat = st.number_input("Body Fat %", 5.0, 60.0, DEFAULTS["body_fat"])
+        with col_b: target_fat = st.number_input("Target Fat %", 5.0, 60.0, DEFAULTS["target_body_fat"])
+        
+        activity = st.selectbox("Activity", [
+            "Sedentary (Office)", "Light (1-2 days)", 
+            "Moderate (3-4 days)", "Active (Physical Job/Sports)"
+        ])
+        goal = st.selectbox("Goal", ["Fat Loss", "Muscle Gain", "Maintenance/Health"])
+        freq = st.selectbox("Frequency", ["2 days/week", "3-4 days/week", "5+ days/week"])
+        
+        generate = st.button("🚀 Generate Plan", type="primary")
 
-        # Calculate Mass
-        start_fat_mass = start_weight * (start_body_fat / 100.0)
-        target_fat_mass = start_weight * (target_body_fat_val / 100.0)
-        fat_to_lose_kg = max(0.0, start_fat_mass - target_fat_mass)
-
-        # Estimate Weeks
-        # Valid if: We are losing fat (change < 0) AND we have fat to lose
-        if weekly_fat_change_kg < 0 and fat_to_lose_kg > 0:
-            weeks_to_target = fat_to_lose_kg / abs(weekly_fat_change_kg)
-        else:
-            weeks_to_target = 0.0
-
-        estimated_weeks = max(1, math.ceil(weeks_to_target))
-        max_weeks_for_chart = 52
-        estimated_weeks = min(estimated_weeks, max_weeks_for_chart)
-
-        # --- LLM + cache ---
-        if input_key in cached:
-            st.success("Loaded from cache!")
-            html_result = cached[input_key]
-            html_content_to_display = cached[input_key]
-        else:
-            with st.spinner("Processing your personalized plan..."):
-                prompt = get_html_generation_prompt(
-                    gender,
-                    age,
-                    weight_kg,
-                    height_cm,
-                    body_fat,
-                    muscle_mass,
-                    target_body_fat,
-                    activity,
-                    goal,
-                    frequency,
-                    estimated_weeks=estimated_weeks,
-                )
-                html_result = call_llm(selected_model, prompt)
-
-                if html_result.strip().startswith("```html"):
-                    html_result = html_result.strip()[7:-3].strip()
-
-                cached[input_key] = html_result
-                st.session_state["cached_results"] = cached
-                html_content_to_display = html_result
-
-        # --------------- Display HTML + Chart ---------------
-        if html_content_to_display:
-            wrapped = (
-                "<div style='display:flex;justify-content:flex-end;margin-bottom:8px'>"
-                "  <button id='download-infographic' style='background:#1abc9c;border:none;color:white;padding:8px 12px;border-radius:8px;cursor:pointer;'>ดาวน์โหลดภาพ (PNG)</button>"
-                "</div>"
-                "<div id='infographic-root'>"
-                + html_content_to_display +
-                "</div>"
-                "<script src='https://html2canvas.hertzen.com/dist/html2canvas.min.js'></script>"
-                "<script>"
-                "  (function(){"
-                "    const btn = document.getElementById('download-infographic');"
-                "    btn.addEventListener('click', async function(){"
-                "      const node = document.getElementById('infographic-root');"
-                "      try {"
-                "        const canvas = await html2canvas(node, {scale: 2, useCORS: true});"
-                "        canvas.toBlob(function(blob){"
-                "          const url = URL.createObjectURL(blob);"
-                "          const a = document.createElement('a');"
-                "          a.href = url;"
-                "          a.download = 'healthinfographic.png';"
-                "          document.body.appendChild(a);"
-                "          a.click();"
-                "          a.remove();"
-                "          URL.revokeObjectURL(url);"
-                "        }, 'image/png');"
-                "      } catch (e) {"
-                "        alert('เกิดข้อผิดพลาดขณะสร้างภาพ: ' + e);"
-                "      }"
-                "    });"
-                "  })();"
-                "</script>"
-            )
-
-            components.html(wrapped, height=1200, scrolling=True)
-
-            # -------- Estimated Body Composition Progress (Weeks Until Target) --------
-            st.subheader("Estimated Body Composition Progress (Weeks Until Target)")
-
-            # Weeks axis
-            weeks = np.arange(1, estimated_weeks + 1)
-            week_labels = [f"Week {w}" for w in weeks]
-
-            bmi = start_weight / (height_m ** 2) if height_m > 0 else None
-
-            # Simulation variables
-            current_weight = start_weight
-            current_fat_mass = start_weight * (start_body_fat / 100.0)
+    # 3. Main Execution Flow
+    if generate:
+        with st.spinner("Analyzing biometrics & Generating Plan..."):
+            # A. Calculate Metrics (Reliability Layer - Python handles Math) [7]
+            # ใช้ Python คำนวณค่า BMR/TDEE แทนการให้ LLM คิดเองเพื่อความแม่นยำ
+            metrics = calculate_metrics(gender, age, weight, height, activity, goal, body_fat, target_fat)
             
-            # Assume Muscle Mass (kg) stays constant (Lean retention)
-            constant_muscle_mass_kg = start_weight * (start_muscle_mass / 100.0)
+            # B. Generate Content (Reasoning Layer - LLM handles Text/HTML) [5][7]
+            user_data = {
+                "gender": gender, "age": age, "height_cm": height, "weight_kg": weight,
+                "body_fat": body_fat, "target_body_fat": target_fat,
+                "activity": activity, "goal": goal, "frequency": freq
+            }
+            html_plan = generate_plan_html(selected_model, user_data, metrics)
             
-            weights = []
-            body_fats = []
-            muscle_pcts = []
-
-            for _ in weeks:
-                # Update absolute values
-                current_weight += weekly_fat_change_kg
-                current_fat_mass += weekly_fat_change_kg 
-                
-                # Safety checks
-                current_weight = max(current_weight, constant_muscle_mass_kg + 1.0)
-                current_fat_mass = max(current_fat_mass, 0.0)
-
-                # Recalculate percentages
-                if current_weight > 0:
-                    current_fat_pct = (current_fat_mass / current_weight) * 100.0
-                    est_muscle_pct = (constant_muscle_mass_kg / current_weight) * 100.0
-                else:
-                    current_fat_pct = 0.0
-                    est_muscle_pct = 0.0
-                
-                # Cap logic
-                current_fat_pct = max(0.0, min(100.0, current_fat_pct))
-                est_muscle_pct = max(0.0, min(100.0, est_muscle_pct))
-
-                # Visual smoother
-                if start_body_fat > target_body_fat_val:
-                    current_fat_pct = max(target_body_fat_val - 2.0, current_fat_pct)
-
-                weights.append(current_weight)
-                body_fats.append(current_fat_pct)
-                muscle_pcts.append(est_muscle_pct)
-
-            weights = np.array(weights)
-            body_fats = np.array(body_fats)
-            muscle_pcts = np.array(muscle_pcts)
-
+            # C. Visualize Progress (Chart)
+            st.subheader("📉 Projected Progress")
+            weeks_arr = np.arange(1, metrics['weeks'] + 1)
+            # Simple linear projection
+            weight_loss_per_week = (metrics['tdee'] - metrics['target_calories']) * 7 / 7700
+            proj_weights = [weight - (weight_loss_per_week * w) for w in weeks_arr]
+            
             fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=weeks,
-                y=body_fats,
-                name="Body Fat %",
-                mode="lines+markers",
-                line=dict(color="#e74c3c", width=2),
-                yaxis="y1",
-                hovertemplate="Week %{x}<br>Body Fat: %{y:.1f}%<extra></extra>",
-            ))
-            fig.add_trace(go.Scatter(
-                x=weeks,
-                y=muscle_pcts,
-                name="Est. Muscle Mass %", 
-                mode="lines+markers",
-                line=dict(color="#3498db", width=2),
-                yaxis="y1",
-                hovertemplate="Week %{x}<br>Muscle: %{y:.1f}%<extra></extra>",
-            ))
-            fig.add_trace(go.Scatter(
-                x=weeks,
-                y=weights,
-                name="Weight (kg)",
-                mode="lines+markers",
-                line=dict(color="#e67e22", width=2),
-                yaxis="y2",
-                hovertemplate="Week %{x}<br>Weight: %{y:.1f} kg<extra></extra>",
-            ))
-
-            fig.update_layout(
-                title={
-                    "text": f"Estimated {estimated_weeks}-Week Body Composition Progress",
-                    "x": 0.5,
-                    "xanchor": "center",
-                    "y": 0.95,
-                },
-                xaxis=dict(
-                    title="Week",
-                    tickmode="array",
-                    tickvals=weeks,
-                    ticktext=week_labels,
-                    showgrid=False,
-                ),
-                yaxis=dict(
-                    title="Body Fat % / Muscle %",
-                    range=[0, max(70, float(body_fats.max()) + 5, float(muscle_pcts.max()) + 5)],
-                    tickmode="linear",
-                    dtick=5,
-                    showgrid=True,
-                    gridcolor="rgba(200,200,200,0.2)",
-                ),
-                yaxis2=dict(
-                    title="Weight (kg)",
-                    overlaying="y",
-                    side="right",
-                    range=[0, max(100, start_weight + 10)],
-                    tickmode="linear",
-                    dtick=5,
-                    showgrid=False,
-                ),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.02,
-                    xanchor="center",
-                    x=0.5,
-                ),
-                margin=dict(l=60, r=80, t=80, b=60),
-                height=420,
-                hovermode="x unified",
-            )
-
+            fig.add_trace(go.Scatter(x=weeks_arr, y=proj_weights, mode='lines+markers', name='Weight'))
+            fig.update_layout(title=f"Estimated Path to {metrics['target_calories']} kcal/day", height=300)
             st.plotly_chart(fig, use_container_width=True)
 
-            # -------- Explanation under the chart --------
-            st.markdown("### How This Projection Is Calculated (Based on Your Inputs)")
+            # D. Render HTML & Image Download Button (Client-side rendering) [12]
+            st.subheader("📋 Your Personalized Plan")
 
-            bmi_str = f"{bmi:.1f}" if bmi is not None else "N/A"
+            # ห่อ HTML Plan ด้วย Script html2canvas เพื่อให้ Browser ทำหน้าที่แปลงเป็นรูปภาพ
+            html_with_js = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+                <style>
+                    /* ปุ่ม Download ตกแต่งให้เข้ากับ Streamlit */
+                    .btn-download {{
+                        display: inline-flex;
+                        align-items: center;
+                        justify-content: center;
+                        background-color: #ff4b4b;
+                        color: white;
+                        padding: 0.5rem 1rem;
+                        border-radius: 0.5rem;
+                        border: none;
+                        font-family: sans-serif;
+                        font-weight: 600;
+                        cursor: pointer;
+                        margin-bottom: 20px;
+                        text-decoration: none;
+                        transition: background-color 0.2s;
+                    }}
+                    .btn-download:hover {{
+                        background-color: #ff3333;
+                    }}
+                    /* พื้นที่สำหรับ Capture */
+                    #capture-area {{
+                        background-color: white; 
+                        padding: 20px;
+                        border-radius: 10px;
+                        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                    }}
+                </style>
+            </head>
+            <body>
+                <div style="text-align: right;">
+                    <button class="btn-download" onclick="downloadImage()">
+                        📸 Download as Image
+                    </button>
+                </div>
+
+                <div id="capture-area">
+                    {html_plan}
+                </div>
+
+                <script>
+                    function downloadImage() {{
+                        const element = document.getElementById('capture-area');
+                        html2canvas(element, {{
+                            scale: 2, // เพิ่มความละเอียด (High DPI)
+                            useCORS: true,
+                            backgroundColor: "#ffffff"
+                        }}).then(canvas => {{
+                            const link = document.createElement('a');
+                            link.download = 'my-fitness-plan.png';
+                            link.href = canvas.toDataURL('image/png');
+                            link.click();
+                        }}).catch(err => {{
+                            console.error("Capture failed:", err);
+                            alert("Unable to generate image at this time.");
+                        }});
+                    }}
+                </script>
+            </body>
+            </html>
+            """
             
-            # Format display strings for balance and change
-            if weekly_energy_balance < 0:
-                balance_str = f"Deficit of {abs(weekly_energy_balance):.0f} kcal/week"
-                change_str = f"Fat LOSS of {abs(weekly_fat_change_kg):.3f} kg/week"
-            else:
-                balance_str = f"Surplus of {weekly_energy_balance:.0f} kcal/week"
-                change_str = f"Gain of {weekly_fat_change_kg:.3f} kg/week"
-
-            st.markdown(
-                f"""
-**1. Your starting point**
-
-- Gender: **{gender}**
-- Age: **{age}**
-- Height: **{height_cm} cm**, Weight: **{start_weight:.1f} kg**
-- Current Body Fat: **{start_body_fat:.1f}%**, Target Body Fat: **{target_body_fat_val:.1f}%**
-- **Current Muscle Mass:** **{start_muscle_mass:.1f}%**
-- Activity Level: **{activity}**
-- Primary Goal: **{goal}**
-
-- **BMI:** {bmi_str}  
-- **BMR (Basal Metabolic Rate):** ~**{bmr:.0f} kcal/day**  
-- **Estimated TDEE (maintenance):** ~**{tdee:.0f} kcal/day**, based on your activity level
-"""
-            )
-
-            st.markdown(
-                f"""
-**2. Calories, fat change, and time to target**
-
-- **Target calories for your goal:** ~**{target_calories:.0f} kcal/day**  
-- **Estimated Energy Balance:** {balance_str}
-- Using ~**7,700 kcal ≈ 1 kg of body fat**, this corresponds to:  
-**{change_str}**
-
-From your starting and target body fat we estimate you need to change fat mass by about
-**{fat_to_lose_kg:.2f} kg**, which corresponds to **≈ {weeks_to_target:.1f} weeks**.
-For the chart, we use **{estimated_weeks} weeks** (capped if very long) to show your trajectory.
-"""
-            )
-
-            st.markdown(
-                """
-**3. How to read the lines**
-
-- **Body Fat % (red)**  
-  Each week we adjust your weight using the estimated weekly fat change. We assume most weight change comes from fat stores (in a moderate deficit), and recalculate your body fat percentage accordingly.
-
-- **Est. Muscle Mass % (blue)**  
-  We assume you are training to **maintain** your muscle mass (kg) while losing fat. 
-  As your total body weight goes down, your **Muscle Percentage** will naturally go **UP**.
-
-- **Weight (kg) (orange)**  
-  Your total body weight is updated week by week based on the estimated fat change.
-"""
-            )
-
-            st.markdown(
-                """
-**4. Interpretation**
-
-- This is a **coaching-style projection**, not a medical prediction.
-- Real progress is usually **non-linear**.
-- Use this as a guide:
-  - Re-measure every **2–4 weeks**,
-  - Compare real numbers to the projection,
-  - Adjust calories, training, and recovery as needed.
-"""
-            )
-
-    elif st.session_state.get("cached_results"):
-        pass
+            # ใช้ components.html เพื่อ render และปรับความสูงให้พอดี
+            components.html(html_with_js, height=900, scrolling=True)
 
 if __name__ == "__main__":
     main()
